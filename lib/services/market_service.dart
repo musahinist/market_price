@@ -32,7 +32,7 @@ class MarketService {
     final results = await Future.wait(
       symbols.map((s) async {
         try {
-          return MapEntry(s, await _fetchOne(s));
+          return MapEntry(s, await _fetchOne(await _quoteSymbol(s)));
         } catch (_) {
           return MapEntry(s, null);
         }
@@ -71,7 +71,90 @@ class MarketService {
   }
 
   /// Bir sembolün [range] aralığındaki kapanış serisini çeker.
+  ///
+  /// Sürekli vadeli sembollerde (`BZ=F` gibi) Yahoo geçmişi o gün vadesi en
+  /// yakın kontrattan çizer; kontrat devrildiğinde seri, fiyatı gösterilen
+  /// kontrata göre birden sıçrar (Brent'te ~%4-5). Bu yüzden grafik güncel
+  /// kontratın kendi serisinden çekilir; o kontratın geçmişi pencereyi
+  /// kapsamıyorsa eksik baş kısım sürekli seriden oranlanarak eklenir.
   Future<PriceSeries> fetchSeries(String symbol, ChartRange range) async {
+    final contract = isContinuousFuture(symbol)
+        ? await _frontContract(symbol).catchError((_) => null)
+        : null;
+    if (contract == null) return _fetchRawSeries(symbol, range);
+
+    final results = await Future.wait([
+      _fetchRawSeries(symbol, range),
+      _fetchRawSeries(
+        contract,
+        range,
+      ).then<PriceSeries?>((s) => s, onError: (_) => null),
+    ]);
+    final continuous = results[0]!;
+    final own = results[1];
+    return own == null ? continuous : own.extendedWith(continuous);
+  }
+
+  /// Fiyatın çekileceği sembol. Vadesi en yakın kontratı izleyen köklerde
+  /// (bkz. [followsNearestContract]) o kontrat, diğerlerinde sembolün kendisi.
+  Future<String> _quoteSymbol(String symbol) async {
+    if (!followsNearestContract(symbol)) return symbol;
+    return await _frontContract(symbol).catchError((_) => null) ?? symbol;
+  }
+
+  /// Bir sürekli vadeli sembolün gösterilecek kontratı.
+  ///
+  /// [followsNearestContract] köklerinde vadesi en yakın, hâlâ işlem gören
+  /// kontrat; diğerlerinde Yahoo'nun sürekli sembolünün izlediği kontrat
+  /// (ör. BZ=F -> BZF27.NYM). Yahoo hangisi olduğunu chart ucunda vermiyor;
+  /// fiyatı sürekli sembolünkiyle eşleşeni seçiyoruz. Sonuç bir saat saklanır.
+  Future<String?> _frontContract(String symbol) async {
+    final cached = _contractCache[symbol];
+    if (cached != null &&
+        DateTime.now().difference(cached.$2) < const Duration(hours: 1)) {
+      return cached.$1;
+    }
+
+    final candidates = futureContracts(symbol, DateTime.now());
+    if (candidates.isEmpty) return null;
+
+    final quotes = await Future.wait([
+      for (final s in [symbol, ...candidates])
+        _fetchOne(s).then<Quote?>((q) => q, onError: (_) => null),
+    ]);
+
+    if (followsNearestContract(symbol)) {
+      final best = nearestLiveContract(candidates, quotes.sublist(1));
+      _contractCache[symbol] = (best, DateTime.now());
+      return best;
+    }
+
+    final prices = [for (final q in quotes) q?.price];
+    final target = prices.first;
+    if (target == null) return null;
+
+    String? best;
+    var bestDiff = double.infinity;
+    for (var i = 0; i < candidates.length; i++) {
+      final price = prices[i + 1];
+      if (price == null) continue;
+      final diff = (price - target).abs() / target;
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = candidates[i];
+      }
+    }
+    // Komşu kontratlar arasındaki fark bundan büyük; eşleşme yoksa sürekli
+    // seriye düş.
+    if (bestDiff > 0.001) best = null;
+
+    _contractCache[symbol] = (best, DateTime.now());
+    return best;
+  }
+
+  static final _contractCache = <String, (String?, DateTime)>{};
+
+  Future<PriceSeries> _fetchRawSeries(String symbol, ChartRange range) async {
     final uri = Uri.parse(
       '$_base/${Uri.encodeComponent(symbol)}'
       '?interval=${range.interval}&range=${range.range}',
@@ -106,13 +189,36 @@ class MarketService {
     if (values.isEmpty) throw const MarketException('Grafik verisi yok.');
 
     final meta = result['meta'] as Map?;
+    double? field(String key) => (meta?[key] as num?)?.toDouble();
+    final previousClose = switch (range) {
+      // 1G yüzdesi listedeki günlük değişimle aynı olsun. Kriptoda
+      // chartPreviousClose gece yarısı (UTC) fiyatı, günlük değişim ise başka
+      // bir referansa göre; ikisi farklı çıkıyor.
+      ChartRange.d1 =>
+        _previousFromChange(
+              field('regularMarketPrice'),
+              field('regularMarketChangePercent'),
+            ) ??
+            field('chartPreviousClose'),
+      // Çok günlük gün içi seride Yahoo'nun chartPreviousClose'u güvenilmez:
+      // kripto ve BIST'te pencerenin ilk gününün kapanışını veriyor. 1H'de
+      // referans serinin ilk noktası.
+      ChartRange.w1 => null,
+      _ => field('chartPreviousClose'),
+    };
     return PriceSeries(
       times: times,
       values: values,
       currency: (meta?['currency'] as String?) ?? '',
-      previousClose:
-          (meta?['chartPreviousClose'] as num?)?.toDouble() ?? values.first,
+      previousClose: previousClose ?? values.first,
     );
+  }
+
+  static double? _previousFromChange(double? price, double? changePercent) {
+    if (price == null || changePercent == null || changePercent <= -100) {
+      return null;
+    }
+    return price / (1 + changePercent / 100);
   }
 
   Future<Quote> _fetchOne(String symbol) async {
@@ -156,6 +262,72 @@ class MarketService {
   }
 
   void dispose() => _client.close();
+}
+
+/// Yahoo'nun sürekli vadeli sembolü mü (ör. `BZ=F`).
+bool isContinuousFuture(String symbol) => symbol.endsWith('=F');
+
+/// Vadesi en yakın kontratı izleyen kökler.
+///
+/// Yahoo `BZ=F`'yi hacme göre vadeden ~bir hafta önce sonraki kontrata
+/// geçiriyor; Brent fiyatı denince ise yaygın olarak vadesi dolana kadar en
+/// yakın kontrat kastediliyor (Ekim 2026'da 115 $'lık Aralık yerine Yahoo
+/// 110 $'lık Ocak'ı gösteriyordu). Diğer köklerde Yahoo'nun seçimi piyasanın
+/// alışılmış kontratıyla aynı (altında Kasım değil Aralık gibi).
+const _nearestContractRoots = {'BZ'};
+
+bool followsNearestContract(String symbol) =>
+    isContinuousFuture(symbol) &&
+    _nearestContractRoots.contains(symbol.substring(0, symbol.length - 2));
+
+/// [candidates] arasında vadesi en yakın, hâlâ işlem gören kontrat.
+///
+/// [quotes] adaylarla aynı sırada; vadesi dolmuş kontrat ya hiç dönmüyor ya da
+/// son işlem zamanı en tazesinden günlerce geride kalıyor.
+String? nearestLiveContract(List<String> candidates, List<Quote?> quotes) {
+  final times = [for (final q in quotes) ?q?.time];
+  if (times.isEmpty) return null;
+  final freshest = times.reduce((a, b) => a.isAfter(b) ? a : b);
+  for (var i = 0; i < candidates.length; i++) {
+    final q = quotes[i];
+    if (q != null && freshest.difference(q.time) < const Duration(days: 2)) {
+      return candidates[i];
+    }
+  }
+  return null;
+}
+
+/// Kontrat sembollerinin borsa son ekleri.
+const _futureExchanges = {
+  'BZ': 'NYM',
+  'CL': 'NYM',
+  'NG': 'NYM',
+  'PL': 'NYM',
+  'PA': 'NYM',
+  'GC': 'CMX',
+  'SI': 'CMX',
+  'HG': 'CMX',
+};
+
+const _monthCodes = 'FGHJKMNQUVXZ';
+
+/// [symbol] için [now] ayından başlayan altı aylık kontrat sembolleri.
+///
+/// Ör. BZ=F, Ekim 2026 -> BZV26.NYM, BZX26.NYM, BZZ26.NYM, BZF27.NYM, ...
+/// Bilinmeyen kökte boş döner.
+List<String> futureContracts(String symbol, DateTime now) {
+  final root = symbol.substring(0, symbol.length - 2);
+  final exchange = _futureExchanges[root];
+  if (exchange == null) return const [];
+  return [
+    for (var i = 0; i < 6; i++)
+      _contractSymbol(root, exchange, DateTime(now.year, now.month + i)),
+  ];
+}
+
+String _contractSymbol(String root, String exchange, DateTime month) {
+  final yy = (month.year % 100).toString().padLeft(2, '0');
+  return '$root${_monthCodes[month.month - 1]}$yy.$exchange';
 }
 
 class MarketException implements Exception {

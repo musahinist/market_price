@@ -40,6 +40,33 @@ class PriceSeries {
         previousClose: previousClose * fx.previousClose / divisor,
       );
 
+  /// Bu serinin kapsamadığı baş kısmı [older]'dan tamamlar.
+  ///
+  /// Vadeli kontratın kendi geçmişi pencereden kısa kaldığında kullanılır:
+  /// [older]'ın bu serinin ilk noktasından önceki kısmı, ek yerinde iki seri
+  /// buluşacak şekilde oranlanıp başa eklenir. Ek yerindeki sıçrama
+  /// kontrat devrinden geldiği için gerçek değil, oranlama onu siler.
+  PriceSeries extendedWith(PriceSeries older) {
+    if (isEmpty || older.isEmpty) return this;
+    final start = times.first;
+    final head = [
+      for (var i = 0; i < older.times.length; i++)
+        if (older.times[i].isBefore(start)) i,
+    ];
+    if (head.isEmpty) return this;
+
+    final junction = older.rateAt(start);
+    if (junction == 0) return this;
+    final ratio = values.first / junction;
+
+    return PriceSeries(
+      times: [for (final i in head) older.times[i], ...times],
+      values: [for (final i in head) older.values[i] * ratio, ...values],
+      currency: currency,
+      previousClose: older.previousClose * ratio,
+    );
+  }
+
   /// [time] anındaki kur: o ana kadarki son bilinen değer.
   double rateAt(DateTime time) {
     if (values.isEmpty) return 0;

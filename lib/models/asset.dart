@@ -79,6 +79,10 @@ class Asset {
   /// Haber araması için Türkçe anahtar kelime.
   final String newsQuery;
 
+  /// Ham fiyatlardan bu varlığın fiyatı; türetilmişse hesaplanır.
+  Quote? quoteFrom(Map<String, Quote> quotes) =>
+      symbol != null ? quotes[symbol] : derive?.call(quotes);
+
   /// Grafikte kullanılacak gerçek sembol.
   String? get effectiveChartSymbol => chartSymbol ?? symbol;
 }

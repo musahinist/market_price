@@ -98,7 +98,11 @@ class FundService {
 
     final row = rows.first;
     final price = _num(row['sonFiyat']);
-    if (price == null) throw MarketException('$code: fiyat yok.');
+    // TEFAS fiyatı henüz yayımlamadığı (ya da fon durdurulduğu) günlerde
+    // sonFiyat 0 dönüyor; ₺0 göstermek yerine fiyatı yok say.
+    if (price == null || price <= 0) {
+      throw MarketException('$code: TEFAS bu fon için fiyat yayımlamamış.');
+    }
 
     double? number(String key) => _num(row[key]);
 

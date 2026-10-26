@@ -295,7 +295,8 @@ class _HomePageState extends State<HomePage>
         _error = null;
         _loading = false;
       });
-      _syncFocusChart();
+      // Grafiğin son noktası da yeni fiyata yetişsin.
+      _syncFocusChart(refresh: true);
       unawaited(_refreshFundQuotes());
     } catch (e) {
       if (!mounted) return;
@@ -322,38 +323,65 @@ class _HomePageState extends State<HomePage>
     _syncFocusChart();
   }
 
+  /// İstenen odak grafiğinin kimliği: 'varlık|aralık'.
+  String? get _wantedFocusChartKey {
+    final asset = _primaryAsset;
+    return asset == null ? null : '${asset.id}|${_focusRange.name}';
+  }
+
   /// Gereken grafik yüklü değilse çeker. Her durum değişiminden sonra çağrılır.
-  void _syncFocusChart() {
+  ///
+  /// [refresh] verilirse yüklü grafik de sessizce yeniden çekilir; yoksa
+  /// liste fiyatı tazelenirken grafik açıldığı andaki fiyatta kalır.
+  void _syncFocusChart({bool refresh = false}) {
     final asset = _primaryAsset;
     if (asset == null || !_focus.primaryOpen || !_focus.chartOpen) return;
 
-    final key = '${asset.id}|${_focusRange.name}';
-    if (key == _focusChartKey || _focusChartLoading) return;
+    final key = _wantedFocusChartKey!;
+    if (_focusChartLoading) return;
+    if (key == _focusChartKey) {
+      if (refresh) _loadFocusChart(asset, key, silent: true);
+      return;
+    }
     _loadFocusChart(asset, key);
   }
 
-  Future<void> _loadFocusChart(Asset asset, String key) async {
-    setState(() {
-      _focusChartLoading = true;
-      _focusChartError = null;
-    });
+  Future<void> _loadFocusChart(
+    Asset asset,
+    String key, {
+    bool silent = false,
+  }) async {
+    if (!silent) {
+      setState(() {
+        _focusChartLoading = true;
+        _focusChartError = null;
+      });
+    }
 
     try {
       final series = await _service.fetchAssetSeries(asset, _focusRange);
-      if (!mounted) return;
+      // Bu arada aralık ya da varlık değiştiyse eski cevabı yazma.
+      if (!mounted || key != _wantedFocusChartKey) return;
       setState(() {
         _focusSeries = series;
         _focusChartKey = key;
         _focusChartLoading = false;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || key != _wantedFocusChartKey) return;
+      // Sessiz tazelemede hata olursa eldeki grafik kalsın.
+      if (silent) return;
       setState(() {
         _focusSeries = null;
         _focusChartKey = null;
         _focusChartError = 'Grafik yüklenemedi.';
         _focusChartLoading = false;
       });
+    } finally {
+      if (mounted && !silent && _focusChartLoading) {
+        setState(() => _focusChartLoading = false);
+        _syncFocusChart();
+      }
     }
   }
 
@@ -469,8 +497,7 @@ class _HomePageState extends State<HomePage>
   /// Bir varlığın fiyatı: doğrudan sembolden ya da türetilerek.
   Quote? _quoteFor(Asset asset) {
     if (asset.fundCode != null) return _fundQuotes[asset.fundCode];
-    if (asset.symbol != null) return _quotes[asset.symbol];
-    return asset.derive?.call(_quotes);
+    return asset.quoteFrom(_quotes);
   }
 
   @override

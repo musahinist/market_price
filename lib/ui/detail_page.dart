@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -17,6 +19,9 @@ import 'range_bar.dart';
 
 const _up = Color(0xFF16C784);
 const _down = Color(0xFFEA3943);
+
+/// Açık detay sayfasında fiyat ve grafiğin tazelenme aralığı.
+const _refreshInterval = Duration(seconds: 60);
 
 class DetailPage extends StatefulWidget {
   const DetailPage({
@@ -43,6 +48,10 @@ class _DetailPageState extends State<DetailPage> {
 
   FundInfo? _fundInfo;
 
+  /// Güncel fiyat; açılışta listedeki değer, sonra dakikada bir tazelenir.
+  late Quote? _quote = widget.quote;
+  Timer? _timer;
+
   /// Bugün verilecek alış / satış emrinin valör tarihi.
   DateTime? _buyValue;
   DateTime? _sellValue;
@@ -66,6 +75,7 @@ class _DetailPageState extends State<DetailPage> {
       _loadFund();
     } else {
       _loadChart();
+      _timer = Timer.periodic(_refreshInterval, (_) => _refreshLive());
     }
     _loadNews();
   }
@@ -73,6 +83,7 @@ class _DetailPageState extends State<DetailPage> {
   @override
   void dispose() {
     ChartRangeSetting.value.removeListener(_onRangeChanged);
+    _timer?.cancel();
     _market.dispose();
     _news.dispose();
     _fundService.dispose();
@@ -93,8 +104,10 @@ class _DetailPageState extends State<DetailPage> {
     });
 
     try {
-      final series = await _market.fetchAssetSeries(widget.asset, _range);
-      if (!mounted) return;
+      final range = _range;
+      final series = await _market.fetchAssetSeries(widget.asset, range);
+      // Bu arada aralık değiştiyse eski cevabı yazma.
+      if (!mounted || range != _range) return;
       setState(() {
         _series = series;
         _chartLoading = false;
@@ -102,10 +115,32 @@ class _DetailPageState extends State<DetailPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
+        _series = null;
         _chartError = e is MarketException ? e.message : 'Grafik yüklenemedi.';
         _chartLoading = false;
       });
     }
+  }
+
+  /// Fiyatı ve grafiği sessizce tazeler; hata olursa eldekiler kalır.
+  Future<void> _refreshLive() async {
+    // Parmak grafiğin üzerindeyken seri altından değişmesin.
+    if (_chartLoading || _selected != null) return;
+    final range = _range;
+    try {
+      final results = await Future.wait([
+        _market.fetchQuotes(widget.asset.requiredSymbols.toList()),
+        _market.fetchAssetSeries(widget.asset, range),
+      ]);
+      if (!mounted || range != _range || _chartLoading || _selected != null) {
+        return;
+      }
+      setState(() {
+        _quote =
+            widget.asset.quoteFrom(results[0] as Map<String, Quote>) ?? _quote;
+        _series = results[1] as PriceSeries;
+      });
+    } catch (_) {}
   }
 
   Future<void> _loadFund() async {
@@ -181,12 +216,11 @@ class _DetailPageState extends State<DetailPage> {
         : null;
     // Canlı fiyat serinin son barından tazedir; başlık da yüzde de onu kullansın
     // ki listedeki değerle birebir tutsun.
-    final live =
-        _fundInfo?.quote.price ?? widget.quote?.price ?? series?.values.last;
+    final live = _fundInfo?.quote.price ?? _quote?.price ?? series?.values.last;
     final headline = picked ?? live;
 
     final changePercent = widget.asset.isFund
-        ? (_fundInfo?.quote.changePercent ?? widget.quote?.changePercent)
+        ? (_fundInfo?.quote.changePercent ?? _quote?.changePercent)
         : _changePercent(series, live);
     final color = (changePercent ?? 0) >= 0 ? _up : _down;
 
@@ -211,7 +245,7 @@ class _DetailPageState extends State<DetailPage> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  _subtitle(series, changePercent),
+                  _subtitle(series, changePercent, live),
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: color,
                     fontWeight: FontWeight.w600,
@@ -285,7 +319,7 @@ class _DetailPageState extends State<DetailPage> {
 
   /// Aralık değişimi: başlıktaki fiyatın, aralık öncesi kapanışa göre farkı.
   double? _changePercent(PriceSeries? series, double? live) {
-    if (series == null || live == null) return widget.quote?.changePercent;
+    if (series == null || live == null) return _quote?.changePercent;
     final base = series.previousClose != 0
         ? series.previousClose
         : series.values.first;
@@ -328,13 +362,18 @@ class _DetailPageState extends State<DetailPage> {
     return '${widget.asset.unit}$formatted${widget.asset.suffix}';
   }
 
-  String _subtitle(PriceSeries? series, double? changePercent) {
+  String _subtitle(PriceSeries? series, double? changePercent, double? live) {
     if (_selected != null && series != null) {
       final t = series.times[_selected!];
       final pattern = _range == ChartRange.d1 || _range == ChartRange.w1
           ? 'd MMM HH:mm'
           : 'd MMM yyyy';
-      return DateFormat(pattern, 'tr').format(t);
+      final date = DateFormat(pattern, 'tr').format(t);
+      // Seçilen noktanın da dönem başına göre değişimi görünsün.
+      final picked = _changePercent(series, series.values[_selected!]);
+      return picked == null
+          ? date
+          : '%${percentFormat.format(picked)}  ·  $date';
     }
 
     if (changePercent == null) return '';
@@ -342,7 +381,7 @@ class _DetailPageState extends State<DetailPage> {
 
     // Fonlar günde bir fiyatlanır; aralık etiketi yerine 'günlük'.
     if (widget.asset.isFund) return '%$pct  ·  günlük';
-    final change = _change(series, widget.quote?.price ?? series?.values.last);
+    final change = _change(series, live);
     final abs = change == null
         ? ''
         : '${change >= 0 ? '+' : ''}'

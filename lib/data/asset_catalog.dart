@@ -6,33 +6,34 @@ import '../models/quote.dart';
 const double _gramPerOunce = 31.1034768;
 
 /// Gram fiyatı üreten türetici: ons fiyatı (USD) * USD/TRY / 31.1
-Quote? Function(Map<String, Quote>) _gramTry(String ounceSymbol) {
-  return (quotes) {
-    final ounce = quotes[ounceSymbol];
-    final usdTry = quotes['TRY=X'];
-    if (ounce == null || usdTry == null) return null;
-    return ounce.scaledBy(
-      usdTry.price / _gramPerOunce,
-      changePercent: ounce.changePercent + usdTry.changePercent,
-      currency: 'TRY',
-      keepWeekRange: false,
+Quote? Function(Map<String, Quote>) _gramTry(String ounceSymbol) =>
+    (quotes) => convertQuote(
+      quotes[ounceSymbol],
+      quotes['TRY=X'],
+      divisor: _gramPerOunce,
     );
-  };
-}
 
 /// USD fiyatını TL'ye çeviren türetici.
-Quote? Function(Map<String, Quote>) _inTry(String usdSymbol) {
-  return (quotes) {
-    final base = quotes[usdSymbol];
-    final usdTry = quotes['TRY=X'];
-    if (base == null || usdTry == null) return null;
-    return base.scaledBy(
-      usdTry.price,
-      changePercent: base.changePercent + usdTry.changePercent,
-      currency: 'TRY',
-      keepWeekRange: false,
-    );
-  };
+Quote? Function(Map<String, Quote>) _inTry(String usdSymbol) =>
+    (quotes) => convertQuote(quotes[usdSymbol], quotes['TRY=X']);
+
+/// [base] fiyatını [fx] kuruyla çarpıp [divisor]'e böler.
+///
+/// Günlük değişim iki yüzdenin toplamı değil bileşkesidir; önceki kapanış da
+/// bugünkü değil önceki kurla çevrilmiş olur, böylece fiyat, önceki kapanış ve
+/// yüzde birbiriyle tutarlı kalır.
+Quote? convertQuote(Quote? base, Quote? fx, {double divisor = 1}) {
+  if (base == null || fx == null) return null;
+  final change =
+      ((1 + base.changePercent / 100) * (1 + fx.changePercent / 100) - 1) * 100;
+  final price = base.price * fx.price / divisor;
+  return base.scaledBy(
+    fx.price / divisor,
+    changePercent: change,
+    currency: 'TRY',
+    keepWeekRange: false,
+    previousClose: price / (1 + change / 100),
+  );
 }
 
 /// Ekranda gösterilecek varlıklar, sırasıyla.
@@ -241,6 +242,40 @@ final List<Asset> kAssets = [
     chartSymbol: 'BTC-USD',
     chartFxSymbol: 'TRY=X',
     newsQuery: 'bitcoin',
+  ),
+  const Asset(
+    id: 'paxg',
+    name: 'PAX Gold',
+    icon: '🪙',
+    group: AssetGroup.kripto,
+    symbol: 'PAXG-USD',
+    unit: '\$',
+    newsQuery: 'pax gold paxg',
+  ),
+  const Asset(
+    id: 'usdtusd',
+    name: 'Tether (USDT)',
+    icon: '₮',
+    group: AssetGroup.kripto,
+    symbol: 'USDT-USD',
+    unit: '\$',
+    decimals: 4,
+    newsQuery: 'usdt tether',
+  ),
+  // Yahoo'da USDT-TRY yok; USDT/USD * USD/TRY ile türetiliyor. Türk
+  // borsalarındaki USDT/TL'den küçük bir prim farkı olabilir.
+  Asset(
+    id: 'usdttry',
+    name: 'USDT / TL',
+    icon: '₮',
+    group: AssetGroup.kripto,
+    unit: '₺',
+    decimals: 3,
+    derive: _inTry('USDT-USD'),
+    deps: const ['USDT-USD', 'TRY=X'],
+    chartSymbol: 'USDT-USD',
+    chartFxSymbol: 'TRY=X',
+    newsQuery: 'usdt tether',
   ),
   const Asset(
     id: 'ethusd',

@@ -38,6 +38,8 @@ class Quote {
 
   /// Fiyat alanlarını [factor] ile çarpar (ör. USD -> TL).
   ///
+  /// [previousClose] verilirse ölçeklenmiş değerin yerine o kullanılır.
+  ///
   /// [keepWeekRange] false verilirse 52 haftalık aralık düşürülür: uzun vadeli
   /// bir aralığı bugünkü kurla çevirmek yanıltıcı olur.
   Quote scaledBy(
@@ -45,6 +47,7 @@ class Quote {
     double? changePercent,
     String? currency,
     bool keepWeekRange = true,
+    double? previousClose,
   }) {
     double? scale(double? v) => v == null ? null : v * factor;
     return Quote(
@@ -56,7 +59,7 @@ class Quote {
       dayHigh: scale(dayHigh),
       weekLow: keepWeekRange ? scale(weekLow) : null,
       weekHigh: keepWeekRange ? scale(weekHigh) : null,
-      previousClose: scale(previousClose),
+      previousClose: previousClose ?? scale(this.previousClose),
     );
   }
 }

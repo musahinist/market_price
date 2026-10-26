@@ -27,8 +27,9 @@ gövde biçimleri var.
 
 ## Derleme
 
-`flutter build apk --debug` çalışıyor. **`--release` bu makinede çalışmıyor** —
-`/etc/hosts` `dl.google.com`'u engelliyor, sebebi ve çözümü belgede.
+Telefona kurulacak sürüm: `flutter build apk --release --split-per-abi`, ardından
+`adb install -r build/app/outputs/flutter-apk/app-arm64-v8a-release.apk`.
+Gradle `dl.google.com`'a erişemezse sebep `/etc/hosts`; ayrıntı belgede.
 
 İkonu değiştirmek: `python3 tool/make_icon.py && dart run flutter_launcher_icons`
 

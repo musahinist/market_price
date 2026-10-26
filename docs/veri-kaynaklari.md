@@ -51,16 +51,49 @@ değişimini bundan hesaplamak doğrudur, denetlendi. (Ör. Brent 6 aylıkta 91,
 = pencere başlangıcından bir gün önceki kapanış; serinin ilk noktasıyla arasındaki
 fark gerçek bir günlük sıçramadan geliyor, hata değil.)
 
+**Referans kapanış tuzakları** (uygulamada `fetchSeries` düzeltiyor):
+
+- **1H (`5d`/`15m`)**: `chartPreviousClose` kripto ve BIST'te pencereden önceki
+  değil, pencerenin *ilk gününün* kapanışı. Referans serinin ilk noktası alınıyor.
+- **1G**: kriptoda `chartPreviousClose` UTC gece yarısı fiyatı, ama
+  `regularMarketChangePercent` başka referansa göre; liste ile detay farklı yüzde
+  gösteriyordu. 1G referansı `fiyat / (1 + değişim%)`.
+
+### Vadeli işlemler: kontrat devri
+
+`BZ=F` gibi sürekli semboller **geriye dönük düzeltilmemiş**. Geçmiş, o gün
+vadesi en yakın kontrattan; anlık fiyat ise yeni kontrattan. Devir günü seri
+sıçrıyor. Ör. Ekim 2026: `BZ=F` günlük serisinde 23 Ekim = 116,72 (Aralık
+kontratı `BZZ26.NYM`), anlık fiyatın önceki kapanışı 111,70 (Ocak kontratı
+`BZF27.NYM`). Grafik son gün sahte −%5 düşüş, 1A değişimi +%6 yerine gerçekte
++%18. Doğal gazda fark %15'e çıkabiliyor.
+
+Çözüm: kontrat sembolü `{kök}{ay kodu}{yy}.{borsa}` (ay kodları `FGHJKMNQUVXZ`;
+`BZ CL NG PL PA` → `.NYM`, `GC SI HG` → `.CMX`). Önümüzdeki 6 ayın kontratları
+çekilip fiyatı sürekli sembolünkiyle eşleşen (fark < %0,1) seçilir, grafik o
+kontratın kendi serisinden çizilir. Kontratların 5 yıllık geçmişi de var; yoksa
+eksik baş kısım sürekli seriden oranlanıp eklenir (`PriceSeries.extendedWith`).
+**Brent istisnası — vadesi en yakın kontrat.** Yahoo `BZ=F`'yi hacme göre
+vadeden ~bir hafta önce sonrakine geçiriyor: 26 Ekim 2026'da `BZ=F` = 110 $
+(Ocak) iken Aralık kontratı 30 Ekim vadesine kadar 115 $'dan işlem görüyordu ve
+kullanıcının baktığı kaynaklar Brent'i 115 $ gösteriyordu. Bu yüzden `BZ` kökünde
+hem anlık fiyat hem grafik, adaylardan **son işlem zamanı en tazesine 2 günden
+yakın olan ilk** kontrattan çekiliyor (`nearestLiveContract`). Vadesi dolan
+kontratın zamanı geride kalınca kendiliğinden bir sonrakine geçer. Diğer
+köklerde (`CL`, `GC`, `NG`...) Yahoo'nun seçimi alışılmış kontratla aynı; altında
+seyrek işlem gören Kasım (`GCX26`) yerine Aralık gibi. Onlarda anlık fiyat
+`=F` sembolünden geliyor.
+
 ### Sembol notları
 
 - Vadeli: `BZ=F` Brent, `CL=F` WTI, `NG=F` doğal gaz, `GC=F` altın, `SI=F` gümüş,
   `PL=F` platin, `PA=F` paladyum, `HG=F` bakır
 - Döviz: `TRY=X` = **USD/TRY**, `EURTRY=X`, `GBPTRY=X`, `CHFTRY=X`, `EURUSD=X`,
   `USDJPY=X`; dolar endeksi `DX-Y.NYB`; ABD 10Y tahvil `^TNX`
-- Kripto: `BTC-USD`, `ETH-USD`, `SOL-USD`, `XRP-USD`, `BNB-USD`, `DOGE-USD`
+- Kripto: `BTC-USD`, `PAXG-USD`, `USDT-USD`, `ETH-USD`, `SOL-USD`, `XRP-USD`, `BNB-USD`, `DOGE-USD`
 - Endeks: `^GSPC`, `^IXIC`, `^DJI`, `^GDAXI`, `^FTSE`, `^N225`, `^VIX`,
   `XU100.IS`, `XU030.IS`, `XBANK.IS`
-- **Yok**: spot `XAUUSD=X` / `XAGUSD=X` çalışmıyor, `BTC-TRY` yok. Spot altın
+- **Yok**: spot `XAUUSD=X` / `XAGUSD=X` çalışmıyor, `BTC-TRY` ve `USDT-TRY` yok (USDT/TL `USDT-USD × TRY=X` ile türetiliyor). Spot altın
   için `PAXG-USD` (1 PAXG = 1 ons altın) vekil olarak kullanılıyor.
 
 ### Yeni piyasa varlığı ekleme
@@ -214,14 +247,11 @@ yoksa çift çözme olur.
 
 ## Derleme ortamı
 
-Bu makinede `/etc/hosts` `dl.google.com`'u `0.0.0.0`'a yönlendiriyor (reklam
-engelleyici listesi). Sonuç: Gradle, Google Maven'dan önbellekte olmayan
-hiçbir şeyi indiremiyor.
+`flutter build apk --release --split-per-abi` çalışıyor (Ekim 2026). Telefona
+`build/app/outputs/flutter-apk/app-arm64-v8a-release.apk` kurulur.
 
-- `flutter build apk --debug` önbellekten çalışıyor.
-- `--release` / `--profile` **çalışmıyor**: Flutter'ın release motor
-  artefaktları `storage.googleapis.com`'da (erişilebilir) ama Gradle önce
-  Google deposunu yokluyor, bağlantı reddedilince depoyu devre dışı bırakıp
-  çözümlemeyi iptal ediyor. `maven.google.com` da `dl.google.com`'a yönlendiriyor.
-- Çözüm kullanıcıda (sudo):
-  `sudo sed -i '' 's/^0\.0\.0\.0 dl\.google\.com/#&/' /etc/hosts`
+Önceden `/etc/hosts` `dl.google.com`'u `0.0.0.0`'a yönlendiriyordu (reklam
+engelleyici listesi) ve release derlemesi bu yüzden başarısızdı. Belirti:
+`Connect to dl.google.com:443 ... Connection refused`, ardından "Repository
+Google is disabled". Tekrar görülürse sebep odur, sandbox değil; hosts satırını
+yorum satırı yapmak kullanıcının kararı (sudo).
